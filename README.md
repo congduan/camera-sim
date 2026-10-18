@@ -13,11 +13,14 @@ An interactive camera simulator built with **Vue 3 + WebGL**. It feeds real came
 ## Features
 
 - **Three exposure modes**: `Av` (aperture priority, shutter auto-linked), `Tv` (shutter priority, aperture auto-linked), and `M` (manual, where you can observe over- and under-exposure).
+- **Two worlds**: a lamp-lit night street and a daytime landscape. `World` swaps the geometry inside the same renderer, camera and optical model; the meter re-calibrates to each world's own nominal EV (8 for the street, 13 for the landscape), so a sunlit meadow meters like daylight instead of inheriting the street's exposure.
+  - The landscape is a lakeside meadow lane: procedural broadleaf and conifer trees, a post-and-rail fence, wild flowers in the near field for wide-aperture bokeh, a lake, green hills and a hazy snow-capped ridge 700 m out. It is lit by a directional sun with shadows plus a hemisphere sky fill, and a gradient dome with a sun disc.
 - **Verified equipment library**: body and lens specs come from manufacturer-published data (source links are kept in `src/data/equipment.js`).
   - Lenses: Canon RF 50mm F1.8, EF 70-200mm F2.8L III, EF 16-35mm F2.8L III, NIKKOR Z 85mm F1.2 S, Sony FE 24-70mm F2.8 GM II
   - Bodies: Canon EOS R6 Mark II, EOS 5D Mark IV, EOS 90D
 - **Ray-picked focus**: click any object in the frame to focus on it; drag to change the viewing direction; scroll to zoom.
-- **Portrait subjects**: three standing figures at 3.4 m, 6.2 m and 9.2 m so every focal length has a subject framed usefully, plus walking pedestrians for the background. Figures come from a rigged character model in `public/models/`, normalised to 1.72 m and animated with `AnimationMixer`; a procedural figure of the same proportions is used when no model is present. Clicking a person snaps the autofocus box onto the face.
+- **Portrait subjects**: three standing figures at 3.4 m, 6.2 m and 9.2 m on the street (two at 3.9 m and 8.6 m on the landscape's lane) so every focal length has a subject framed usefully, plus walking pedestrians for the background. Figures come from a rigged character model in `public/models/`, normalised to 1.72 m and animated with `AnimationMixer`; a procedural figure of the same proportions is used when no model is present. Clicking a person snaps the autofocus box onto the face.
+- **The scene does not wait for the models**: both glTF downloads start in parallel before the renderer initialises, and the world is built straight away with the procedural figures and box cars. When the files land the world is rebuilt around them, so a slow network costs detail rather than a black screen. A `Loading models…` chip in the top bar marks the swap, and switching worlds afterwards reuses the loaded models instead of downloading them again.
 - **Parked cars**: a Draco-compressed car model, normalised to 4.53 m, with per-instance paint duplicated so each car keeps its own colour. Orientation is measured from the model rather than hard-coded. The decoder is served from `public/draco/`, and a box car stands in if either the model or the decoder is missing.
 - **Depth of field and light path**: live readouts for DoF range, hyperfocal distance, image distance, entrance/exit pupil diameter, pupil magnification and Airy radius.
 - **Pixel peep**: renders at true photosensitive-site granularity so you can see the Bayer array (CFA) and photon shot noise; drag to pan the sampling window.
@@ -97,8 +100,9 @@ camera-sim/
         ├── personAsset.js   # Loads and normalises the rigged character model
         ├── vehicleAsset.js  # Loads and normalises the vehicle model
         ├── people.js        # Procedural humanoid fallback
-        ├── scene3d.js       # 3D scene geometry
-        └── webglRenderer.js # Renderer and per-pixel imaging
+        ├── landscape.js     # Daytime landscape world (meadow, lake, ridge)
+        ├── scene3d.js       # Night street world, plus the world dispatcher
+        └── webglRenderer.js # Renderer, per-pixel imaging and world swapping
 ```
 
 ## Notes

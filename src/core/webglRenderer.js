@@ -30,7 +30,15 @@ const SAMPLES = 18;
 const GOLDEN_ANGLE = 2.399963229728653;
 const METER_SIZE = 64;   // luminance map the metering pass is reduced to
 
-export async function createRenderer(canvas) {
+export async function createRenderer(canvas, { world: startWorld = 'street' } = {}) {
+  // Both downloads start before the renderer does anything else. They used to be
+  // sequential and to wait for the GPU handshake first, which put 3.7 MB of glTF
+  // behind the device initialisation and the character behind the car.
+  const downloads = Promise.allSettled([
+    loadPersonAsset({ timeout: 15000 }),
+    loadVehicleAsset({ timeout: 15000 })
+  ]);
+
   const renderer = new THREE.WebGPURenderer({ canvas, antialias: false, alpha: false, outputBufferType: THREE.HalfFloatType });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   renderer.setSize(canvas.clientWidth, canvas.clientHeight, false);
@@ -38,17 +46,27 @@ export async function createRenderer(canvas) {
   await renderer.init();
   const isWebGPU = !!renderer.backend?.isWebGPUBackend;
 
-  // The character model is picked up before the world is built, so the people
-  // can be created with it rather than swapped afterwards. A missing or
-  // unreachable file resolves to null within a few seconds and the procedural
-  // figures are used instead.
-  const personAsset = await loadPersonAsset();
-  const vehicleAsset = await loadVehicleAsset();
-  const world = buildWorld({ personAsset, vehicleAsset });
-  if (personAsset) console.info(`[lens-sim] people: ${personAsset.source} (${personAsset.sourceHeight.toFixed(2)} m tall, ${personAsset.clips.length} clips, facing turned ${Math.round(personAsset.yaw * 180 / Math.PI)} deg)`);
-  else console.info('[lens-sim] people: procedural figure');
-  if (vehicleAsset) console.info(`[lens-sim] vehicles: ${vehicleAsset.source} (${vehicleAsset.sourceSpan.toArray().map((v) => v.toFixed(2)).join(' x ')} m authored, facing turned ${Math.round(vehicleAsset.yaw * 180 / Math.PI)} deg)`);
-  else console.info('[lens-sim] vehicles: box car');
+  // The world is built before the models arrive. Waiting for the files used to
+  // hold the first frame hostage, so the procedural figures and box cars stand in
+  // for the first second and the scene is rebuilt in place once they land. The
+  // timeout is generous because a late arrival is now useful rather than a black
+  // frame.
+  let personAsset = null;
+  let vehicleAsset = null;
+  let ready = false;     // set once the passes exist, so late assets can be swapped in
+  let disposed = false;
+  let world = buildWorld({ world: startWorld, personAsset, vehicleAsset });
+  const assetsReady = downloads.then(([person, vehicle]) => {
+    personAsset = person.status === 'fulfilled' ? person.value : null;
+    vehicleAsset = vehicle.status === 'fulfilled' ? vehicle.value : null;
+    logAssets(personAsset, vehicleAsset);
+    if (!ready || disposed) return false;   // picked up by the next world build
+    rebuildWorld();
+    return true;
+  }).catch((err) => {
+    console.warn('[lens-sim] models unavailable, keeping the procedural stand-ins', err);
+    return false;
+  });
   const camera = new THREE.PerspectiveCamera(45, 1, 0.3, 1000);
   camera.position.set(0, 1.62, 0);
 
@@ -306,7 +324,13 @@ export async function createRenderer(canvas) {
   const raycaster = new THREE.Raycaster();
   const pointer = new THREE.Vector2();
   const pickables = [];
-  world.scene.traverse((node) => { if (node.isMesh && !node.userData.ignorePick) pickables.push(node); });
+  // The pick list is derived from whatever scene is mounted, so it is rebuilt
+  // whenever the world is swapped rather than captured once at start-up.
+  const refreshPickables = () => {
+    pickables.length = 0;
+    world.scene.traverse((node) => { if (node.isMesh && !node.userData.ignorePick) pickables.push(node); });
+  };
+  refreshPickables();
   const hitPoint = new THREE.Vector3();
   const faceWorld = new THREE.Vector3();
   const faceNdc = new THREE.Vector3();
@@ -476,18 +500,52 @@ export async function createRenderer(canvas) {
     animationFrame = requestAnimationFrame(() => render(state, lens, body, focalLength, lightPath, sensor));
   };
 
+  // Swapping the world keeps the renderer, the camera and the optical model: the
+  // next frame simply renders the new geometry into the same targets. Asset
+  // buffers are marked shared by the builders, so the outgoing scene frees only
+  // what it created itself.
+  const mountWorld = (id) => {
+    const next = buildWorld({ world: id, personAsset, vehicleAsset });
+    world.dispose();
+    world = next;
+    refreshPickables();
+  };
+  const rebuildWorld = () => mountWorld(world.id);
+  const setWorld = (id) => {
+    if (!id || id === world.id) return false;
+    mountWorld(id);
+    return true;
+  };
+
   const start = (state, lens, body, focalLength, lightPath, sensor) => { stop(); render(state, lens, body, focalLength, lightPath, sensor); };
   const stop = () => { if (animationFrame) cancelAnimationFrame(animationFrame); animationFrame = undefined; };
   const dispose = () => {
+    disposed = true;
     stop(); world.dispose();
     quad.geometry.dispose(); material.dispose(); depthMaterial.dispose();
     meterQuad.geometry.dispose(); meterMaterial.dispose();
     sceneTarget.dispose(); depthTarget.dispose(); meterTarget.dispose();
     renderer.dispose();
   };
+  ready = true;
   return {
-    start, stop, dispose, resize, pick, sampleMeter, capture, renderer, camera, world,
-    personSource: world.personSource, vehicleSource: world.vehicleSource,
+    start, stop, dispose, resize, pick, sampleMeter, capture, renderer, camera, setWorld,
+    // Resolves once the glTF downloads settle; `true` means the world was rebuilt
+    // with (some of) them, so the caller can re-read the sources below.
+    assetsReady,
+    // Getters, not values: the mounted world changes when the scene is switched.
+    get world() { return world; },
+    get personSource() { return world.personSource; },
+    get vehicleSource() { return world.vehicleSource; },
     backend: isWebGPU ? 'WebGPU' : 'WebGL2'
   };
+}
+
+// Reported once the downloads settle, so the console shows what the scene is
+// actually made of rather than what it was standing in with.
+function logAssets(personAsset, vehicleAsset) {
+  if (personAsset) console.info(`[lens-sim] people: ${personAsset.source} (${personAsset.sourceHeight.toFixed(2)} m tall, ${personAsset.clips.length} clips, facing turned ${Math.round(personAsset.yaw * 180 / Math.PI)} deg)`);
+  else console.info('[lens-sim] people: procedural figure');
+  if (vehicleAsset) console.info(`[lens-sim] vehicles: ${vehicleAsset.source} (${vehicleAsset.sourceSpan.toArray().map((v) => v.toFixed(2)).join(' x ')} m authored, facing turned ${Math.round(vehicleAsset.yaw * 180 / Math.PI)} deg)`);
+  else console.info('[lens-sim] vehicles: box car');
 }

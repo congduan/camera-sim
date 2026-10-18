@@ -16,9 +16,11 @@ export const narrowestAperture = lens => {
 // because ISO raises the exposure value the meter has to reach.
 export const SHUTTERS = [30, 15, 8, 4, 2, 1, 0.5, 0.25, 0.125, 1 / 15, 1 / 30, 1 / 60, 1 / 125, 1 / 250, 1 / 500, 1 / 1000, 1 / 2000, 1 / 4000, 1 / 8000];
 export const ISOS = [100, 200, 400, 800, 1600, 3200, 6400, 12800, 25600, 51200];
-// Scene brightness value at ISO 100. EV 8 matches the lit street the 3D world
-// renders, and keeps the whole aperture/shutter/ISO table usable: the default
-// f/2.8 ISO 400 state meters to 1/125s.
+// Scene brightness value at ISO 100, and the value the street world declares.
+// EV 8 matches the lamp-lit street, and keeps the whole aperture/shutter/ISO
+// table usable: the default f/2.8 ISO 400 state meters to 1/125s. Other worlds
+// bring their own value - the daytime landscape in `landscape.js` is EV 13 - and
+// the meter calibrates itself against whichever one is mounted.
 export const SCENE_EV = 8;
 
 import { MOUNTS as VERIFIED_MOUNTS, VERIFIED_BODIES, VERIFIED_LENSES } from '../data/equipment';

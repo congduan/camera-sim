@@ -35,8 +35,11 @@ export const SCENE_EV_RANGE = [1, 18];
 // Calibration converts the renderer's relative luminance into a scene exposure
 // value. It is captured from the first reading, so the scene as it loads meters
 // to its nominal EV and every later framing is measured relative to that.
-export function calibrateEv(luminance) {
-  return SCENE_EV - Math.log2(Math.max(luminance, 1e-7));
+// Each world brings its own nominal EV - a sunlit landscape is several stops
+// brighter than a lamp-lit street - so the calibration has to be told which one
+// it is anchoring to.
+export function calibrateEv(luminance, nominalEv = SCENE_EV) {
+  return nominalEv - Math.log2(Math.max(luminance, 1e-7));
 }
 
 export function luminanceToEv(luminance, calibration) {

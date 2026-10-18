@@ -4,6 +4,8 @@ import { Fn, float, mix, positionLocal, smoothstep, vec3 } from 'three/tsl';
 import { buildPerson, disposePeople } from './people';
 import { createPersonInstance } from './personAsset';
 import { PAINT_COLOURS, createVehicleInstance } from './vehicleAsset';
+import { SCENE_EV } from './constants';
+import { buildLandscapeWorld } from './landscape';
 
 // ---------------------------------------------------------------------------
 // The world the lens looks at. Everything is real geometry with PBR materials,
@@ -100,7 +102,7 @@ function mesh(geometry, material, position, rotation) {
  * @return {object} The world handle, including `personSource` and
  *   `vehicleSource` so the caller can report what actually ended up in the scene.
  */
-export function buildWorld({ personAsset = null, vehicleAsset = null } = {}) {
+export function buildStreetWorld({ personAsset = null, vehicleAsset = null } = {}) {
   const rand = mulberry32(20261015);
   const scene = new THREE.Scene();
   const fog = new THREE.Fog(new THREE.Color().setRGB(HORIZON[0], HORIZON[1], HORIZON[2]), 10, 250);
@@ -196,6 +198,9 @@ export function buildWorld({ personAsset = null, vehicleAsset = null } = {}) {
     const x = side * (ROAD_HALF - 1.45);
     if (vehicleAsset) {
       const car = createVehicleInstance(vehicleAsset, { paint });
+      // Clones share the asset's buffers, so disposing this world must leave
+      // them alone: the same model is used again if the world is rebuilt.
+      car.traverse((node) => { if (node.isMesh) node.userData.sharedAsset = true; });
       car.position.set(x, 0.012, z);
       car.rotation.y = side < 0 ? Math.PI : 0;   // side < 0 travels away from us
       scene.add(car);
@@ -237,6 +242,7 @@ export function buildWorld({ personAsset = null, vehicleAsset = null } = {}) {
   const spawn = (role, { build = 1, speed = 1, style = 'short' }) => {
     if (personAsset) {
       const instance = createPersonInstance(personAsset, { clip: role, build, speed, phase: rand() });
+      instance.group.traverse((node) => { if (node.isMesh) node.userData.sharedAsset = true; });
       if (instance.mixer) mixers.push(instance.mixer);
       return instance.group;
     }
@@ -327,6 +333,7 @@ export function buildWorld({ personAsset = null, vehicleAsset = null } = {}) {
 
   const dispose = () => {
     scene.traverse((node) => {
+      if (node.userData.sharedAsset) return;   // cloned from a loaded asset
       if (node.geometry) node.geometry.dispose();
       const material = node.material;
       if (Array.isArray(material)) material.forEach(disposeMaterial);
@@ -336,10 +343,26 @@ export function buildWorld({ personAsset = null, vehicleAsset = null } = {}) {
   };
 
   return {
+    id: 'street',
+    ev: SCENE_EV,
     scene, fog, moon, sky, update, dispose,
     personSource: personAsset ? personAsset.source : null,
     vehicleSource: vehicleAsset ? vehicleAsset.source : null
   };
+}
+
+/**
+ * Builds whichever world the viewfinder is pointed at.
+ *
+ * @param {object} [options]
+ * @param {'street'|'landscape'} [options.world] - Which scene to build.
+ * @param {?object} [options.personAsset] - Rigged character model, if loaded.
+ * @param {?object} [options.vehicleAsset] - Vehicle model, if loaded.
+ * @return {object} The world handle: `id`, `ev`, `scene`, `fog`, the animation
+ *   `update`, `dispose`, and the asset sources actually used.
+ */
+export function buildWorld({ world = 'street', ...assets } = {}) {
+  return world === 'landscape' ? buildLandscapeWorld(assets) : buildStreetWorld(assets);
 }
 
 function disposeMaterial(material) {

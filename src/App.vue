@@ -10,7 +10,7 @@ import { withExif } from './core/exif';
 import { METERING_MODES, calibrateEv, luminanceToEv, meteringCentre } from './core/metering';
 import { bodyName, hint, htmlLang, lensDesign, locale, t, toggleLocale } from './core/i18n';
 
-const canvas = ref(null); const error = ref(''); const help = ref(false); const previewSrc = ref(''); const dragging = ref(null); const didDrag = ref(false); const personSource = ref(null); const vehicleSource = ref(null); let renderer;
+const canvas = ref(null); const error = ref(''); const help = ref(false); const previewSrc = ref(''); const dragging = ref(null); const didDrag = ref(false); const personSource = ref(null); const vehicleSource = ref(null); const assetsLoading = ref(true); let renderer;
 // The panel carries a lot of instrumentation, which on a phone would sit on top
 // of the whole viewfinder. Below the sheet breakpoint it therefore starts folded
 // into a bottom drawer that still offers the exposure readout and the shutter.
@@ -19,6 +19,11 @@ const panelOpen = ref(!narrowQuery.matches);
 function syncNarrow(event) { panelOpen.value = !event.matches; }
 function toggleHelp() { help.value = !help.value; if (help.value) panelOpen.value = true; }
 const { state, reset, currentLens, currentBody, focal, update } = createCameraState();
+// The worlds the renderer can mount: a lamp-lit street and a daytime
+// landscape. Both are real geometry, so every readout below applies to either.
+const WORLD_SCENES = ['street', 'landscape'];
+const worldLabel = (id) => t(id === 'landscape' ? 'worldLandscape' : 'worldStreet');
+const vehicleLabel = computed(() => vehicleSource.value ?? (state.world === 'landscape' ? t('notPlaced') : t('vehicleFallback')));
 const lens = computed(() => currentLens()); const body = computed(() => currentBody());
 const aperture = computed(() => APERTURES[state.aperture]); const shutter = computed(() => SHUTTERS[state.shutter]); const iso = computed(() => ISOS[state.iso]);
 // The aperture slider spans only what the mounted lens has: an f/1.8 lens cannot
@@ -45,6 +50,31 @@ function refresh() { update(); clampPeep(); if (renderer) renderer.start(state, 
 function setLens(index) { state.lens = Number(index); state.zoom = 0; state.focusDistance = lens.value.mfd; refresh(); }
 function setBody(index) { state.body = Number(index); centerPeep(); refresh(); }
 function setMode(mode) { state.mode = mode; refresh(); }
+// Switching worlds keeps the rig. The renderer swaps the geometry, the meter
+// drops its calibration and anchors again to the new world's nominal EV, and the
+// exposure relinks, so a sunny landscape meters on its own EV scale instead of
+// inheriting the street's.
+function applyWorld() {
+  meterCalibration = null;
+  state.sceneEv = renderer.world.ev ?? state.sceneEv;
+  personSource.value = renderer.personSource;
+  vehicleSource.value = renderer.vehicleSource;
+  update();
+  refresh();
+  meterSoon();
+}
+function setWorld(id) {
+  if (state.world === id) return;
+  state.world = id;
+  // A click can land while the models are still loading; the mount below then
+  // builds the world the state already points at.
+  if (!renderer) return;
+  try {
+    if (renderer.setWorld(id)) applyWorld();
+  } catch (err) {
+    error.value = err.message;
+  }
+}
 // Autofocus. The box is placed where the frame was tapped, then snaps onto a
 // face when the ray landed on a person, and the lens racks to that distance. The
 // short delay is what makes it read as an acquisition rather than an instant jump.
@@ -84,7 +114,7 @@ async function meterNow() {
   const centre = meteringCentre(state);
   const luminance = await renderer.sampleMeter(state.metering, centre.x, centre.y);
   if (!(luminance > 0)) return;
-  if (meterCalibration === null) meterCalibration = calibrateEv(luminance);
+  if (meterCalibration === null) meterCalibration = calibrateEv(luminance, renderer.world.ev);
   const ev = luminanceToEv(luminance, meterCalibration);
   // Only re-expose on a meaningful change, so meter noise cannot make the
   // shutter flicker between two adjacent values.
@@ -177,18 +207,20 @@ async function toggleViewfinder() {
 watch(() => [state.aperture, state.shutter, state.iso, state.zoom, state.focusDistance, state.lens, state.body, state.mode, state.grid, state.whiteBalance, state.yaw, state.pitch, state.peep, state.peepX, state.peepY, state.peepSpan, state.cfa, state.sensorNoise], refresh, { deep: true });
 function handleResize() { renderer?.resize(); refresh(); }
 watch([locale, htmlLang], () => { document.documentElement.lang = htmlLang.value; document.title = t('documentTitle'); }, { immediate: true });
-onMounted(async () => { await nextTick(); try { centerPeep(); renderer = await createRenderer(canvas.value); personSource.value = renderer.personSource; vehicleSource.value = renderer.vehicleSource; renderer.start(state, lens.value, body.value, focal(), lightPath.value, sensor.value); window.addEventListener('resize', handleResize); narrowQuery.addEventListener('change', syncNarrow); meterTimer = setInterval(meterNow, 400); } catch (err) { error.value = err.message; } });
+// A world picked while the models were still loading is mounted here, not skipped.
+onMounted(async () => { await nextTick(); try { centerPeep(); renderer = await createRenderer(canvas.value, { world: state.world }); if (renderer.setWorld(state.world)) meterCalibration = null; state.sceneEv = renderer.world.ev ?? state.sceneEv; update(); personSource.value = renderer.personSource; vehicleSource.value = renderer.vehicleSource; renderer.start(state, lens.value, body.value, focal(), lightPath.value, sensor.value); window.addEventListener('resize', handleResize); narrowQuery.addEventListener('change', syncNarrow); meterTimer = setInterval(meterNow, 400); renderer.assetsReady.then((rebuilt) => { assetsLoading.value = false; if (!rebuilt) return; personSource.value = renderer.personSource; vehicleSource.value = renderer.vehicleSource; }); } catch (err) { assetsLoading.value = false; error.value = err.message; } });
 onBeforeUnmount(() => { window.removeEventListener('resize', handleResize); narrowQuery.removeEventListener('change', syncNarrow); clearInterval(meterTimer); clearTimeout(meterDebounce); clearAfTimers(); if (previewSrc.value) URL.revokeObjectURL(previewSrc.value); renderer?.dispose(); });
 </script>
 
 <template>
   <main class="camera-app"><div class="stage" :class="{ evf: state.viewfinder }"><canvas ref="canvas" class="viewport" @click="focus" @pointerdown="startDrag" @pointermove="moveView" @pointerup="endDrag" @pointercancel="endDrag" @wheel.prevent="zoomBy($event.deltaY)"></canvas><section class="assist" :class="{ on: state.grid }"><span></span><span></span></section><div v-if="state.afState !== 'idle'" class="af-box" :class="state.afState" :style="afStyle" role="status"><span></span><span></span><span></span><span></span><em>{{ afStatus }}</em></div>
       <div v-if="state.viewfinder" class="evf"><i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i><div class="evf-bar top"><span>{{ state.mode }}</span><span>{{ t('meter' + state.metering.charAt(0).toUpperCase() + state.metering.slice(1)) }}</span><span>{{ state.whiteBalance }}K</span><span>{{ Math.round(focal() * body.crop) }}mm {{ t('equivalentShort') }}</span></div><div class="evf-scale"><i v-for="n in 13" :key="n" :class="{ major: (n - 7) % 2 === 0 }"></i><b :class="needleClass" :style="{ left: needleLeft }"></b></div><div class="evf-bar bottom"><span><b>f/{{ aperture }}</b> {{ shutterLabel(shutter) }}</span><span><b>ISO {{ iso }}</b></span><span>{{ Math.round(focal()) }}mm</span><span>{{ t('shots') }} <b>{{ String(state.shots).padStart(4, '0') }}</b></span></div></div></div><div v-if="error" class="fatal">⚠️ {{ error }}</div>
-    <header class="topbar"><span>{{ exif }}</span><b>LENS SIM · VUE ENGINE</b></header>
+    <header class="topbar"><span>{{ exif }}</span><span v-if="assetsLoading" class="loading-chip">{{ t('loadingModels') }}</span><b>LENS SIM · VUE ENGINE</b></header>
     <aside class="control-panel" :class="{ collapsed: !panelOpen }"><div class="panel-title"><div><small>{{ t('tagline') }}</small><h1>{{ t('appTitle') }}</h1></div><div class="panel-actions"><button class="locale" :title="t('switchTo')" @click="toggleLocale">{{ t('switchTo') }}</button><button @click="toggleHelp">?</button><button class="fold" :aria-expanded="panelOpen" :aria-label="panelOpen ? t('collapsePanel') : t('expandPanel')" :title="panelOpen ? t('collapsePanel') : t('expandPanel')" @click="panelOpen = !panelOpen">{{ panelOpen ? '▾' : '▴' }}</button></div></div>
       <div class="panel-compact"><span>{{ exif }}</span><button class="mini-shutter" type="button" :aria-label="t('photoPreview')" @click="takePhoto"><span></span></button></div>
       <div class="panel-body"><div v-if="help" class="help">{{ t('helpA') }}<br>{{ t('helpB') }}<br>{{ t('helpC') }}</div>
       <div class="modes"><button v-for="mode in ['Av','Tv','M']" :key="mode" :class="{ active: state.mode === mode }" @click="setMode(mode)">{{ mode }}</button></div>
+      <div class="world-row"><span>{{ t('world') }}</span><button v-for="id in WORLD_SCENES" :key="id" :class="{ active: state.world === id }" @click="setWorld(id)">{{ worldLabel(id) }}</button></div>
       <div class="selectors"><label>{{ t('lens') }}<select :value="state.lens" @change="setLens($event.target.value)"><option v-for="(item,index) in LENSES" :key="item.id" :value="index">{{ item.name }}</option></select></label><label>{{ t('body') }}<select :value="state.body" @change="setBody($event.target.value)"><option v-for="(item,index) in BODIES" :key="item.id" :value="index">{{ bodyName(item) }}</option></select></label></div>
       <div class="readouts"><span>{{ t('aperture') }}<strong>f/{{ aperture }}</strong><input v-model.number="state.aperture" type="range" :min="apertureMin" :max="apertureMax" :disabled="state.mode === 'Tv'" /></span><span>{{ t('shutter') }}<strong>{{ shutterLabel(shutter) }}</strong><input v-model.number="state.shutter" type="range" min="0" :max="SHUTTERS.length - 1" :disabled="state.mode === 'Av'" /></span><span>ISO<strong>{{ iso }}</strong><input v-model.number="state.iso" type="range" min="0" :max="ISOS.length - 1" /></span><span>{{ t('focal') }}<strong>{{ Math.round(focal()) }}mm</strong><input v-model.number="state.zoom" type="range" min="0" max="100" :disabled="lens.min === lens.max" /></span><span>{{ t('focus') }}<strong>{{ formatDistance(state.focusDistance) }}</strong><input v-model.number="state.focusDistance" type="range" :min="lens.mfd" max="30" step=".01" @input="state.lockSubject = false" /></span><span>{{ t('whiteBalance') }}<strong>{{ state.whiteBalance }}K</strong><input v-model.number="state.whiteBalance" type="range" min="2500" max="9500" step="100" /></span></div>
       <div class="meta">{{ t('depthOfField') }} {{ formatDistance(dof.near) }} – {{ dof.far === Infinity ? '∞' : formatDistance(dof.far) }} · {{ t('hyperfocal') }} {{ formatDistance(dof.hyperfocal) }}<br>{{ lens.blades }} {{ t('blades') }} · MFD {{ lens.mfd.toFixed(2) }}m · {{ t('equivalentShort') }} {{ Math.round(focal() * body.crop) }}mm</div>
@@ -202,7 +234,7 @@ onBeforeUnmount(() => { window.removeEventListener('resize', handleResize); narr
         <span>{{ t('dynamicRange') }}<b>{{ sensor.dynamicRange.toFixed(1) }}EV</b></span><span>ADC<b>{{ sensor.bitDepth }}bit</b></span><span>{{ t('coc') }}<b>{{ (lightPath.coc.subject * body.sensorHeight * 1000).toFixed(1) }}µm</b></span>
         <span>{{ t('isoGain') }}<b>{{ gainEv >= 0 ? '+' : '' }}{{ gainEv.toFixed(0) }}EV → {{ t('singleFrameWell') }} {{ gainFullWell }}ke⁻</b></span>
         <span>{{ t('character') }}<b>{{ personSource ?? t('characterFallback') }}</b></span>
-        <span>{{ t('vehicle') }}<b>{{ vehicleSource ?? t('vehicleFallback') }}</b></span>
+        <span>{{ t('vehicle') }}<b>{{ vehicleLabel }}</b></span>
       </div></div>
       <div class="view-tools"><button @click="setView(-.3)">{{ t('lookLeft') }}</button><button @click="setView(0)">{{ t('frontView') }}</button><button @click="setView(.3)">{{ t('lookRight') }}</button></div><button class="shutter" type="button" :aria-label="t('photoPreview')" @click="takePhoto"><span></span></button><div v-if="state.peep" class="view-tools"><label>{{ t('peepField') }} {{ Math.round(state.peepSpan) }}px<input v-model.number="state.peepSpan" type="range" min="8" max="400" step="2" /></label><button @click="centerPeep">{{ t('recenter') }}</button></div><div class="meter-row"><span class="meter-label">{{ t('metering') }}</span><button v-for="mode in METERING_MODES" :key="mode" :class="{ active: state.metering === mode }" @click="setMetering(mode)">{{ t('meter' + mode.charAt(0).toUpperCase() + mode.slice(1)) }}</button><span class="meter-ev">{{ t('meteredEv') }} {{ state.sceneEv.toFixed(1) }}</span></div><div class="tools"><button :class="{ active: state.grid }" :title="hint('distortionGrid')" @click="state.grid = !state.grid">{{ t('distortionGrid') }}</button><button :class="{ active: state.lockSubject }" :title="hint('lockSubject')" @click="state.lockSubject = !state.lockSubject">{{ t('lockSubject') }}</button><button :class="{ active: state.sensorNoise }" :title="hint('cmosNoise')" @click="state.sensorNoise = !state.sensorNoise">{{ t('cmosNoise') }}</button><button :class="{ active: state.cfa }" :title="hint('bayerArray')" :disabled="!state.peep" @click="state.cfa = !state.cfa">{{ t('bayerArray') }}</button><button :class="{ active: state.peep }" :title="hint('pixelPeep')" @click="state.peep = !state.peep">{{ t('pixelPeep') }}</button><button :class="{ active: state.viewfinder }" :title="hint('viewfinder')" @click="toggleViewfinder">{{ t('viewfinder') }}</button><button :title="hint('resetRig')" @click="resetAll">{{ t('resetRig') }}</button></div>
       </div>
